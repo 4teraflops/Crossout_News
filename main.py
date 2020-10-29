@@ -5,6 +5,9 @@ from bs4 import BeautifulSoup
 from loguru import logger
 import sqlite3
 import json
+import time
+from datetime import datetime
+
 
 db_path = 'src/db.sqlite'
 global_params = {'topics_dict': {}, 'updates_hrefs': set}
@@ -16,13 +19,23 @@ logger.add(f'log/{__name__}.log', format='{time} {level} {message}', level='DEBU
 Сейчас скрипт видит что есть одна новая новость. Надо чекнуть как себя поведет когда их будет несколько
 Хочу чтоб он смотрел не по последней записи, а по всей странице
 Это позволит проверять редко и по этому даже если появится несколько новстей, он их всех сдетектит и отправит
+Кажется работает
 """
 
 
-def do_discord_webhook(webhook_url):
-    webhook = DiscordWebhook(url=f'{webhook_url}', content=f'{"content"}')
-    response = webhook.execute()
-    return response
+def check_db():
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    tables = cursor.execute(
+        'SELECT name from sqlite_master WHERE type = "table"').fetchall()  # Смотрим какие есть таблицы
+    valid_tables = []
+    for t in tables:
+        valid_tables.append(t[0])
+
+    if 'actual_topics' not in valid_tables:
+        cursor.execute('CREATE TABLE "actual_topics" ("id"	INTEGER NOT NULL, "title" TEXT NOT NULL, "href" TEXT NOT '
+                       'NULL, "update_time" TEXT, PRIMARY KEY("id" AUTOINCREMENT))')
+    conn.commit()
 
 
 def parse_titles_hrefs_from_site():
@@ -41,6 +54,7 @@ def parse_titles_hrefs_from_site():
         #logger.debug(f'href: {href}') 25
         # Превращаем данные в словарь (заголовок: ссылка)
         topics_dict[f'{href}'] = title
+        global_params['topics_dict'] = {}  # Зачищаем то что осталось в глобальной переменной
         global_params['topics_dict'] = topics_dict  # Кладем в глобальную переменную
     #logger.info(f'global_params["topics_dict"]: {global_params["topics_dict"]}')
         #Кладем словарь. Ключ - ссылка, значение - заголовок
@@ -55,8 +69,9 @@ def posting_updates():
     if updates:
         for i in updates:
             logger.info(f'Updates href for posting: {i}')
+            do_discord_webhook(config.odin_webhook_url, i)
     else:
-        #logger.info(f'No updates for posting')
+        logger.info(f'No updates for posting')
         pass
 
 
@@ -91,15 +106,38 @@ def check_updates():
     updates_hrefs = new_hrefs - old_hrefs
     #logger.info(f'updates_hrefs: {updates_hrefs}')
     # Пишем в глобальную переменную
+    global_params['updates_hrefs'] = set  # зачищая предварительно то что там было
     global_params['updates_hrefs'] = updates_hrefs
     #logger.info(f'global_params["updates_hrefs"]: {global_params["updates_hrefs"]}')
 
 
+def save_updates():
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(f'DELETE FROM actual_topics')  # Удаляем текущие данные
+    now = datetime.now()
+    time = now.strftime('%d-%m-%Y %H:%M:%S')
+    for key in global_params["topics_dict"].keys():  # Перезаписываем актуальные темы
+        #logger.info(f'topik: {global_params["topics_dict"][f"{key}"]}, href: {key} ')
+        cursor.execute(f'INSERT INTO actual_topics VALUES (Null, "{global_params["topics_dict"][f"{key}"]}", "{key}", "{time}")')
+    conn.commit()
+
+
+def do_discord_webhook(webhook_url, content):
+    webhook = DiscordWebhook(url=f'{webhook_url}', content=f'{content}')
+    response = webhook.execute()
+    return response
+
+
 @logger.catch()
 def main():
-    parse_titles_hrefs_from_site()
-    check_updates()
-    posting_updates()
+    while True:
+        parse_titles_hrefs_from_site()
+        check_updates()
+        posting_updates()
+        check_db()
+        save_updates()
+        time.sleep(3600)
 
 
 if __name__ == '__main__':
